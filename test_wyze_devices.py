@@ -696,7 +696,7 @@ class WyzeDevicesTest(unittest.TestCase):
 
         self.assertEqual(0, exit_code)
         self.assertEqual(2, calls["count"])
-        self.assertIn("Retrying with certifi CA bundle: /tmp/cacert.pem", stderr.getvalue())
+        self.assertIn(f"Retrying with certifi CA bundle: {Path('/tmp/cacert.pem')}", stderr.getvalue())
 
 
 if __name__ == "__main__":

@@ -630,7 +630,7 @@ def default_agent_skills_dir() -> Path:
     configured = os.getenv("CODEX_HOME")
     if configured:
         return Path(configured).expanduser().resolve() / "skills"
-    return Path.home() / ".codex" / "skills"
+    return fallback_home_dir() / ".codex" / "skills"
 
 
 def bundled_skill_dir() -> Path:

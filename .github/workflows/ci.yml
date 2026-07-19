@@ -61,6 +61,6 @@ jobs:
             PYTHON="smoke-venv/bin/python"
             CLI="smoke-venv/bin/wyze-local-devices"
           fi
-          "$PYTHON" -m pip install dist/*.whl
+          "$PYTHON" -m pip install --no-deps dist/*.whl
           "$CLI" --help
           "$CLI" skill --json
