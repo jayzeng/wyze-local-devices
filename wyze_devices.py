@@ -41,7 +41,8 @@ import sqlite3
 import subprocess
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Never
@@ -109,12 +110,19 @@ def default_db_path() -> Path:
         data_dir = Path.home() / "Library" / "Application Support" / APP_NAME
     elif sys.platform == "win32":
         base = os.getenv("LOCALAPPDATA") or os.getenv("APPDATA")
-        data_dir = Path(base).expanduser() / APP_NAME if base else Path.home() / f".{APP_NAME}"
+        data_dir = Path(base).expanduser() / APP_NAME if base else fallback_home_dir() / f".{APP_NAME}"
     else:
         base = os.getenv("XDG_DATA_HOME")
-        data_dir = Path(base).expanduser() / APP_NAME if base else Path.home() / ".local" / "share" / APP_NAME
+        data_dir = Path(base).expanduser() / APP_NAME if base else fallback_home_dir() / ".local" / "share" / APP_NAME
 
     return data_dir / "devices.sqlite3"
+
+
+def fallback_home_dir() -> Path:
+    try:
+        return Path.home()
+    except RuntimeError:
+        return Path.cwd()
 
 
 def resolve_db_path(explicit_path: str | None) -> Path:
@@ -146,32 +154,41 @@ def load_credentials(env_file: Path | None) -> dict[str, str | None]:
     return {key: first_env(names) for key, names in ENV_ALIASES.items()}
 
 
-def open_device_db(db_path: Path) -> sqlite3.Connection:
+@contextmanager
+def open_device_db(db_path: Path) -> Iterator[sqlite3.Connection]:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(db_path)
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS devices (
-            mac TEXT PRIMARY KEY,
-            nickname TEXT,
-            type TEXT,
-            model TEXT,
-            product_type TEXT,
-            online INTEGER NOT NULL DEFAULT 0,
-            ip TEXT,
-            ssid TEXT,
-            rssi INTEGER,
-            firmware_version TEXT,
-            hardware_version TEXT,
-            timezone TEXT,
-            discovered_at TEXT NOT NULL
+    try:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS devices (
+                mac TEXT PRIMARY KEY,
+                nickname TEXT,
+                type TEXT,
+                model TEXT,
+                product_type TEXT,
+                online INTEGER NOT NULL DEFAULT 0,
+                ip TEXT,
+                ssid TEXT,
+                rssi INTEGER,
+                firmware_version TEXT,
+                hardware_version TEXT,
+                timezone TEXT,
+                discovered_at TEXT NOT NULL
+            )
+            """
         )
-        """
-    )
-    connection.execute("CREATE INDEX IF NOT EXISTS idx_devices_nickname ON devices(nickname)")
-    connection.execute("CREATE INDEX IF NOT EXISTS idx_devices_model ON devices(model)")
-    connection.execute("CREATE INDEX IF NOT EXISTS idx_devices_type ON devices(type)")
-    return connection
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_devices_nickname ON devices(nickname)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_devices_model ON devices(model)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_devices_type ON devices(type)")
+        yield connection
+    except Exception:
+        connection.rollback()
+        raise
+    else:
+        connection.commit()
+    finally:
+        connection.close()
 
 
 def persist_devices(devices: Sequence[dict[str, Any]], db_path: Path) -> int:

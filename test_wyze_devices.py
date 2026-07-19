@@ -522,9 +522,12 @@ class WyzeDevicesTest(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(0, exit_code)
         self.assertEqual("wyze-local-devices", payload["name"])
-        self.assertTrue(payload["source"].endswith("skills/wyze-local-devices"))
-        self.assertTrue(payload["skill_file"].endswith("skills/wyze-local-devices/SKILL.md"))
-        self.assertTrue(payload["agents_metadata"].endswith("skills/wyze-local-devices/agents/openai.yaml"))
+        self.assertEqual(("skills", "wyze-local-devices"), Path(payload["source"]).parts[-2:])
+        self.assertEqual(("skills", "wyze-local-devices", "SKILL.md"), Path(payload["skill_file"]).parts[-3:])
+        self.assertEqual(
+            ("skills", "wyze-local-devices", "agents", "openai.yaml"),
+            Path(payload["agents_metadata"]).parts[-4:],
+        )
 
     def test_bundled_skill_dir_falls_back_to_installed_data_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -600,7 +603,7 @@ class WyzeDevicesTest(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(0, exit_code)
         self.assertTrue(payload["removed"])
-        self.assertTrue(payload["destination"].endswith("skills/wyze-local-devices"))
+        self.assertEqual(("skills", "wyze-local-devices"), Path(payload["destination"]).parts[-2:])
 
     def test_main_lookup_uses_fresh_cache_without_credentials(self) -> None:
         stdout = io.StringIO()
