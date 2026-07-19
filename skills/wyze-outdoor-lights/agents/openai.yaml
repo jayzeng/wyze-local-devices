@@ -1,0 +1,4 @@
+interface:
+  display_name: "Wyze Outdoor Lights"
+  short_description: "Turn Wyze outdoor plug outlets on or off from the local repo."
+  default_prompt: "Turn the Wyze outdoor lights off and verify the result."
