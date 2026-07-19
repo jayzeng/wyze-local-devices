@@ -53,6 +53,10 @@ repeat the install work.
 
 Python 3.12, 3.13, or 3.14 is supported by this package metadata.
 
+## Usage demo
+
+![Terminal usage demo showing the Wyze local devices CLI](recording.gif)
+
 ## Install as a CLI
 
 For repeated use on a machine, install the project into an isolated tool
