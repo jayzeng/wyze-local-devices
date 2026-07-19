@@ -8,6 +8,10 @@ Lists, caches, looks up, and controls Wyze devices using
 [`wyze-sdk`](https://github.com/shauntarves/wyze-sdk), from either a standalone
 script or the installed `wyze-local-devices` command.
 
+## Usage demo
+
+![Terminal usage demo showing the Wyze local devices CLI](recording.gif)
+
 ## Features
 
 - List online Wyze devices by default, or include offline devices with `--all`.
@@ -52,10 +56,6 @@ already available locally. After that, it reuses the cache, so later runs do not
 repeat the install work.
 
 Python 3.12, 3.13, or 3.14 is supported by this package metadata.
-
-## Usage demo
-
-![Terminal usage demo showing the Wyze local devices CLI](recording.gif)
 
 ## Install as a CLI
 
