@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 # /// script
-# requires-python = ">=3.11"
+# requires-python = ">=3.12,<3.15"
 # dependencies = [
 #   "python-dotenv>=1.0.0",
-#   "wyze-sdk==2.2.0",
+#   "protobuf==5.29.6",
+#   "wyze-sdk==2.3.6",
 # ]
+# [tool.uv]
+# override-dependencies = ["protobuf==5.29.6"]
 # ///
 """Wyze local device CLI.
 
@@ -334,7 +337,9 @@ def make_client(creds: dict[str, str | None]) -> Any:
     try:
         from wyze_sdk import Client
     except ImportError as exc:
-        raise RuntimeError("wyze-sdk is not installed; run `pip install -r requirements.txt`.") from exc
+        raise RuntimeError(
+            "wyze-sdk is not installed; run `uv sync` or `uv run --script wyze_devices.py ...`."
+        ) from exc
 
     if creds["access_token"]:
         return Client(

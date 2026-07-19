@@ -40,6 +40,8 @@ On first use, `uv` may resolve/download packages into its cache if they are not
 already available locally. After that, it reuses the cache, so later runs do not
 repeat the install work.
 
+Python 3.12 or 3.13 is required by the current Wyze SDK.
+
 The script auto-loads the nearest `.env` in this folder or any parent folder. It supports these variables:
 
 ```bash
@@ -202,25 +204,22 @@ reported as command-sent because the SDK does not expose the same state check.
 
 ```bash
 uv run --script wyze_devices.py --help
-python -m unittest
+uv run python -m unittest
 ```
 
 ## Development
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e ".[dev]"
+uv sync --extra dev
 ```
 
 Run the same checks used in CI:
 
 ```bash
-ruff format --check .
-ruff check .
-mypy wyze_devices.py test_wyze_devices.py
-python -m unittest
+uv run ruff format --check .
+uv run ruff check .
+uv run mypy wyze_devices.py test_wyze_devices.py
+uv run python -m unittest
 ```
 
 ## Security

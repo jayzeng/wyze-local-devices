@@ -92,9 +92,10 @@ class WyzeDevicesTest(unittest.TestCase):
 
     def test_script_has_uv_inline_dependency_metadata(self) -> None:
         self.assertIn("# /// script", SCRIPT_TEXT)
-        self.assertIn('# requires-python = ">=3.11"', SCRIPT_TEXT)
+        self.assertIn('# requires-python = ">=3.12,<3.15"', SCRIPT_TEXT)
         self.assertIn('"python-dotenv>=1.0.0"', SCRIPT_TEXT)
-        self.assertIn('"wyze-sdk==2.2.0"', SCRIPT_TEXT)
+        self.assertIn('"protobuf==5.29.6"', SCRIPT_TEXT)
+        self.assertIn('"wyze-sdk==2.3.6"', SCRIPT_TEXT)
 
     def test_missing_credentials_message_accepts_token_or_full_login(self) -> None:
         empty_creds: dict[str, str | None] = {key: None for key in wyze_devices.ENV_ALIASES}

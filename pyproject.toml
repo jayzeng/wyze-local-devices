@@ -3,12 +3,13 @@ name = "wyze-local-devices"
 version = "0.1.0"
 description = "List, cache, look up, and control local Wyze devices from a single Python CLI."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12,<3.15"
 license = "MIT"
 authors = [{ name = "Jay Zeng" }]
 dependencies = [
+  "protobuf==5.29.6",
   "python-dotenv>=1.0.0",
-  "wyze-sdk==2.2.0",
+  "wyze-sdk==2.3.6",
 ]
 
 [project.optional-dependencies]
@@ -17,18 +18,15 @@ dev = [
   "ruff>=0.6.0",
 ]
 
-[project.scripts]
-wyze-devices = "wyze_devices:main"
-
 [tool.ruff]
 line-length = 120
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 warn_unused_configs = true
 warn_return_any = true
 warn_unused_ignores = true
@@ -37,5 +35,8 @@ no_implicit_optional = true
 check_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = ["dotenv", "wyze_sdk", "wyze_sdk.*"]
+module = ["dotenv", "wyze_sdk"]
 ignore_missing_imports = true
+
+[tool.uv]
+override-dependencies = ["protobuf==5.29.6"]
