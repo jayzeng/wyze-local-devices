@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import tempfile
+import tomllib
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -18,6 +19,7 @@ import wyze_devices
 
 SCRIPT_TEXT = Path(wyze_devices.__file__).read_text()
 PYPROJECT_TEXT = (Path(wyze_devices.__file__).resolve().parent / "pyproject.toml").read_text()
+PYPROJECT = tomllib.loads(PYPROJECT_TEXT)
 
 
 def device(
@@ -134,6 +136,10 @@ class WyzeDevicesTest(unittest.TestCase):
         self.assertIn('"python-dotenv>=1.0.0"', SCRIPT_TEXT)
         self.assertIn('"protobuf==5.29.6"', SCRIPT_TEXT)
         self.assertIn('"wyze-sdk==2.3.6"', SCRIPT_TEXT)
+
+    def test_project_metadata_does_not_pin_transitive_protobuf_dependency(self) -> None:
+        self.assertNotIn("protobuf==5.29.6", PYPROJECT["project"]["dependencies"])
+        self.assertIn("protobuf==5.29.6", PYPROJECT["tool"]["uv"]["override-dependencies"])
 
     def test_missing_credentials_message_accepts_token_or_full_login(self) -> None:
         empty_creds: dict[str, str | None] = {key: None for key in wyze_devices.ENV_ALIASES}
