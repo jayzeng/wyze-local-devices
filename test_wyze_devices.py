@@ -617,6 +617,45 @@ class WyzeDevicesTest(unittest.TestCase):
         self.assertEqual(0, exit_code)
         self.assertIn("Cached plug", stdout.getvalue())
 
+    def test_main_lookup_refresh_forces_live_refresh_with_fresh_cache(self) -> None:
+        client = FakeClient([device("Fresh patio plug", mac="AA:BB:02")])
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "devices.sqlite3"
+            wyze_devices.persist_devices([wyze_devices.device_to_dict(device("Cached desk plug"))], db_path)
+
+            with (
+                patch.dict(os.environ, {"WYZE_ACCESS_TOKEN": "token"}, clear=True),
+                patch.object(wyze_devices, "make_client", return_value=client),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                exit_code = wyze_devices.main(["--db-file", str(db_path), "lookup", "patio", "--refresh"])
+
+        self.assertEqual(0, exit_code)
+        self.assertIn("Discovery cache refreshed with 1 device", stderr.getvalue())
+        self.assertIn("Fresh patio plug", stdout.getvalue())
+        self.assertNotIn("Cached desk plug", stdout.getvalue())
+
+    def test_main_lookup_refresh_requires_credentials_with_fresh_cache(self) -> None:
+        stderr = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "devices.sqlite3"
+            wyze_devices.persist_devices([wyze_devices.device_to_dict(device("Cached plug"))], db_path)
+
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch.object(wyze_devices, "find_env_file", return_value=None),
+                contextlib.redirect_stderr(stderr),
+            ):
+                exit_code = wyze_devices.main(["--db-file", str(db_path), "lookup", "--refresh"])
+
+        self.assertEqual(2, exit_code)
+        self.assertIn("wyze-sdk needs either WYZE_ACCESS_TOKEN", stderr.getvalue())
+
     def test_main_lookup_refreshes_missing_cache_before_lookup(self) -> None:
         client = FakeClient([device("Discovered plug")])
         stdout = io.StringIO()

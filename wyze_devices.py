@@ -996,6 +996,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  uv run --script wyze_devices.py skill --install",
             "  uv run --script wyze_devices.py skill --uninstall",
             "  uv run --script wyze_devices.py lookup camera",
+            "  uv run --script wyze_devices.py lookup camera --refresh",
             '  uv run --script wyze_devices.py control "desk plug" off',
             '  uv run --script wyze_devices.py adjust-light "corner" brighter --step 20 --verify --json',
             '  uv run --script wyze_devices.py set-light "corner" --brightness 70 --temperature 3500',
@@ -1079,7 +1080,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Look up devices from the local discovery cache.",
         description=(
             "Look up discovered devices. Refreshes the local cache first when "
-            f"it is missing, empty, or older than {CACHE_MAX_AGE_DAYS} days."
+            f"it is missing, empty, older than {CACHE_MAX_AGE_DAYS} days, or --refresh is passed."
         ),
     )
     lookup_parser.add_argument(
@@ -1091,6 +1092,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="Print JSON instead of a table.",
+    )
+    lookup_parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Force a live Wyze refresh before reading from the local discovery cache.",
     )
 
     control_parser = subparsers.add_parser(
@@ -1223,7 +1229,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_skill(args)
 
     db_path = resolve_db_path(args.db_file)
-    needs_refresh = args.command == "lookup" and discovery_cache_needs_refresh(db_path)
+    needs_refresh = args.command == "lookup" and (args.refresh or discovery_cache_needs_refresh(db_path))
     if args.command == "lookup" and not needs_refresh:
         return run_lookup(args)
 

@@ -20,7 +20,13 @@ uv run --script wyze_devices.py lookup --json
 If the cache is missing, empty, or stale, the CLI may refresh from Wyze automatically. When a fresh live inventory is explicitly needed, run:
 
 ```bash
-uv run --script wyze_devices.py list --all --discover --json
+uv run --script wyze_devices.py lookup --refresh --json
+```
+
+If a cached lookup succeeds but does not include the requested device or device group, rerun the lookup once with `--refresh` before concluding that no matching device exists:
+
+```bash
+uv run --script wyze_devices.py lookup "<requested device name or group>" --refresh --json
 ```
 
 If live discovery fails but `lookup --json` succeeds, report the cached devices and include the `discovered_at` timestamp so the user can judge freshness.
@@ -86,7 +92,7 @@ uv run --script wyze_devices.py set-light "<matched outdoor device name or share
 Refresh device inventory when the device mapping may have changed:
 
 ```bash
-uv run --script wyze_devices.py list --all --discover --json
+uv run --script wyze_devices.py lookup --refresh --json
 ```
 
 ## Reporting
