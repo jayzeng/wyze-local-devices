@@ -2,6 +2,7 @@
 # /// script
 # requires-python = ">=3.12,<3.15"
 # dependencies = [
+#   "certifi>=2024.2.2",
 #   "python-dotenv>=1.0.0",
 #   "protobuf==5.29.6",
 #   "wyze-sdk==2.3.6",
@@ -14,10 +15,16 @@
 Examples:
   uv run --script wyze_devices.py list
   uv run --script wyze_devices.py list --discover
+  uv run --script wyze_devices.py skill --install
+  uv run --script wyze_devices.py skill --uninstall
   uv run --script wyze_devices.py lookup camera
   uv run --script wyze_devices.py control "desk plug" off
+  uv run --script wyze_devices.py adjust-light "corner" brighter --step 20 --verify --json
+  uv run --script wyze_devices.py set-light "corner" --brightness 70 --temperature 3500
+  uv run --script wyze_devices.py set-light "corner" --color ff8800 --verify --json
   python wyze_devices.py list
   python wyze_devices.py list --all --json
+  python wyze_devices.py skill --json
   python wyze_devices.py lookup plug
   python wyze_devices.py control "entry camera" on --json
   python wyze_devices.py --env-file ../.env list
@@ -31,7 +38,9 @@ import logging
 import os
 import shutil
 import sqlite3
+import subprocess
 import sys
+import time
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -50,10 +59,15 @@ ENV_ALIASES = {
 CACHE_MAX_AGE_DAYS = 30
 CONTROLLER_PLUG_MODELS = {"WLPPO"}
 PLUG_TYPES = {"Plug", "OutdoorPlug"}
+BULB_TYPES = {"Light", "MeshLight"}
 CAMERA_TYPES = {"Camera"}
+DEFAULT_BRIGHTNESS_STEP = 20
+DEFAULT_MIN_BRIGHTNESS = 1
+DEFAULT_MAX_BRIGHTNESS = 100
 APP_NAME = "wyze-local-devices"
-SKILL_NAME = "wyze-outdoor-lights"
-SKILL_DIR = Path(__file__).resolve().parent / "skills" / SKILL_NAME
+SKILL_NAME = "wyze-local-devices"
+SOURCE_SKILL_DIR = Path(__file__).resolve().parent / "skills" / SKILL_NAME
+INSTALLED_SKILL_DIR = Path(sys.prefix) / "share" / APP_NAME / "skills" / SKILL_NAME
 
 # Avoid noisy wyze-sdk warnings that dump full raw device payloads.
 logging.getLogger("wyze_sdk.models.devices").setLevel(logging.ERROR)
@@ -397,6 +411,22 @@ def is_controller_plug(device: Any) -> bool:
     return product_model(device) in CONTROLLER_PLUG_MODELS and "-" not in mac
 
 
+def ensure_sdk_bulb_model_support(device: Any) -> None:
+    model = product_model(device)
+    if not model or device_type(device) not in BULB_TYPES:
+        return
+
+    try:
+        from wyze_sdk.models.devices import DeviceModels  # type: ignore[import-untyped]
+    except ImportError:
+        return
+
+    for model_list_name in ("MESH_BULB", "BULB"):
+        model_list = getattr(DeviceModels, model_list_name, None)
+        if isinstance(model_list, list) and model not in model_list:
+            model_list.append(model)
+
+
 def print_table(devices: list[dict[str, Any]], columns: Sequence[str] | None = None) -> None:
     if not devices:
         print("No matching Wyze devices found.")
@@ -423,6 +453,54 @@ def device_matches_query(device: Any, query: str) -> bool:
     return any(pattern in str(value).casefold() for value in values if value)
 
 
+def is_bulb_device(device: Any) -> bool:
+    return device_type(device) in BULB_TYPES
+
+
+def normalize_hex_color(value: str) -> str:
+    color = value.strip().removeprefix("#")
+    if len(color) != 6 or any(char not in "0123456789abcdefABCDEF" for char in color):
+        raise argparse.ArgumentTypeError("color must be a 6-digit hex value, for example ff8800 or #ff8800")
+    return color.upper()
+
+
+def bounded_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("value must be an integer") from exc
+    return parsed
+
+
+def brightness_direction_delta(direction: str, step: int) -> int:
+    if direction in {"brighter", "up", "increase"}:
+        return step
+    if direction in {"dimmer", "down", "decrease"}:
+        return -step
+    raise ValueError(f"unsupported brightness direction: {direction}")
+
+
+def adjusted_brightness(
+    current: Any,
+    direction: str,
+    step: int,
+    min_brightness: int = DEFAULT_MIN_BRIGHTNESS,
+    max_brightness: int = DEFAULT_MAX_BRIGHTNESS,
+) -> int:
+    if step < 1:
+        raise ValueError("brightness step must be at least 1")
+    if min_brightness < 0 or max_brightness < 0 or min_brightness > max_brightness:
+        raise ValueError("brightness bounds are invalid")
+
+    fallback = max_brightness if brightness_direction_delta(direction, step) > 0 else min_brightness
+    try:
+        base = int(current)
+    except (TypeError, ValueError):
+        return fallback
+
+    return max(min_brightness, min(max_brightness, base + brightness_direction_delta(direction, step)))
+
+
 def control_device(client: Any, device: Any, action: str) -> str:
     mac = attr(device, "mac")
     model = product_model(device)
@@ -436,6 +514,12 @@ def control_device(client: Any, device: Any, action: str) -> str:
         method(device_mac=mac, device_model=model)
         return f"turned {action} plug"
 
+    if dtype in BULB_TYPES:
+        ensure_sdk_bulb_model_support(device)
+        method = client.bulbs.turn_on if action == "on" else client.bulbs.turn_off
+        method(device_mac=mac, device_model=model)
+        return f"turned {action} bulb"
+
     if dtype in CAMERA_TYPES:
         method = client.cameras.turn_on if action == "on" else client.cameras.turn_off
         method(device_mac=mac, device_model=model)
@@ -444,7 +528,43 @@ def control_device(client: Any, device: Any, action: str) -> str:
     return f"skipped unsupported type/model: {dtype or 'unknown'}/{model or 'unknown'}"
 
 
-def verification_rows(client: Any, devices: Sequence[Any]) -> list[dict[str, Any]]:
+def device_power_info(client: Any, device: Any) -> dict[str, Any] | None:
+    dtype = device_type(device)
+    mac = attr(device, "mac")
+
+    if dtype in PLUG_TYPES:
+        info = client.plugs.info(device_mac=mac)
+        return {"type": dtype, "is_on": getattr(info, "is_on", None)}
+
+    if dtype in BULB_TYPES:
+        ensure_sdk_bulb_model_support(device)
+        info = client.bulbs.info(device_mac=mac)
+        return {
+            "type": dtype,
+            "is_on": getattr(info, "is_on", None),
+            "brightness": getattr(info, "brightness", None),
+            "temperature": getattr(info, "color_temp", None),
+            "color": getattr(info, "color", None),
+        }
+
+    return None
+
+
+def verified_power_info(client: Any, device: Any, expected_action: str | None) -> dict[str, Any] | None:
+    expected_is_on = {"on": True, "off": False}.get(expected_action or "")
+    attempts = 4 if expected_is_on is not None else 1
+
+    for attempt in range(attempts):
+        info = device_power_info(client, device)
+        if info is None or expected_is_on is None or info.get("is_on") == expected_is_on:
+            return info
+        if attempt < attempts - 1:
+            time.sleep(1)
+
+    return info
+
+
+def verification_rows(client: Any, devices: Sequence[Any], expected_action: str | None = None) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for device in sorted(devices, key=lambda item: (attr(item, "nickname") or "").casefold()):
         name = attr(device, "nickname") or attr(device, "mac") or "unnamed device"
@@ -453,9 +573,9 @@ def verification_rows(client: Any, devices: Sequence[Any]) -> list[dict[str, Any
 
         if is_controller_plug(device):
             rows.append({"nickname": name, "mac": mac, "status": "parent/controller skipped"})
-        elif dtype in PLUG_TYPES:
-            info = client.plugs.info(device_mac=mac)
-            rows.append({"nickname": name, "mac": mac, "type": dtype, "is_on": getattr(info, "is_on", None)})
+        elif dtype in PLUG_TYPES or dtype in BULB_TYPES:
+            power_info = verified_power_info(client, device, expected_action)
+            rows.append({"nickname": name, "mac": mac, **(power_info or {"type": dtype, "is_on": None})})
         elif dtype in CAMERA_TYPES:
             rows.append({"nickname": name, "mac": mac, "type": dtype, "status": "camera command sent"})
     return rows
@@ -496,12 +616,20 @@ def default_agent_skills_dir() -> Path:
     return Path.home() / ".codex" / "skills"
 
 
-def skill_manifest(destination: Path | None = None) -> dict[str, str]:
+def bundled_skill_dir() -> Path:
+    for candidate in (SOURCE_SKILL_DIR, INSTALLED_SKILL_DIR):
+        if (candidate / "SKILL.md").exists():
+            return candidate
+    return SOURCE_SKILL_DIR
+
+
+def skill_manifest(destination: Path | None = None) -> dict[str, Any]:
+    skill_dir = bundled_skill_dir()
     manifest = {
         "name": SKILL_NAME,
-        "source": str(SKILL_DIR),
-        "skill_file": str(SKILL_DIR / "SKILL.md"),
-        "agents_metadata": str(SKILL_DIR / "agents" / "openai.yaml"),
+        "source": str(skill_dir),
+        "skill_file": str(skill_dir / "SKILL.md"),
+        "agents_metadata": str(skill_dir / "agents" / "openai.yaml"),
     }
     if destination is not None:
         manifest["destination"] = str(destination)
@@ -509,15 +637,28 @@ def skill_manifest(destination: Path | None = None) -> dict[str, str]:
 
 
 def install_skill(destination_root: Path) -> Path:
-    if not SKILL_DIR.exists():
-        raise FileNotFoundError(f"Bundled skill not found: {SKILL_DIR}")
+    skill_dir = bundled_skill_dir()
+    if not skill_dir.exists():
+        raise FileNotFoundError(f"Bundled skill not found: {skill_dir}")
 
     destination = destination_root / SKILL_NAME
     destination_root.mkdir(parents=True, exist_ok=True)
     if destination.exists():
         shutil.rmtree(destination)
-    shutil.copytree(SKILL_DIR, destination)
+    shutil.copytree(skill_dir, destination)
     return destination
+
+
+def uninstall_skill(destination_root: Path) -> tuple[Path, bool]:
+    destination = destination_root / SKILL_NAME
+    if not destination.exists():
+        return destination, False
+
+    if not destination.is_dir():
+        raise NotADirectoryError(f"Installed skill path is not a directory: {destination}")
+
+    shutil.rmtree(destination)
+    return destination, True
 
 
 def run_skill(args: argparse.Namespace) -> int:
@@ -532,13 +673,26 @@ def run_skill(args: argparse.Namespace) -> int:
             print(f"Installed {SKILL_NAME} to {destination}")
         return 0
 
+    if args.uninstall:
+        destination, removed = uninstall_skill(destination_root)
+        if args.json:
+            payload = skill_manifest(destination)
+            payload["removed"] = removed
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        elif removed:
+            print(f"Uninstalled {SKILL_NAME} from {destination}")
+        else:
+            print(f"{SKILL_NAME} is not installed at {destination}")
+        return 0
+
     if args.json:
         print(json.dumps(skill_manifest(destination), indent=2, sort_keys=True))
     else:
         print(f"Skill: {SKILL_NAME}")
-        print(f"Source: {SKILL_DIR}")
+        print(f"Source: {bundled_skill_dir()}")
         print(f"Install destination: {destination}")
         print("Install with: uv run --script wyze_devices.py skill --install")
+        print("Uninstall with: uv run --script wyze_devices.py skill --uninstall")
     return 0
 
 
@@ -597,7 +751,9 @@ def run_control(client: Any, args: argparse.Namespace) -> int:
         rows.append(item)
 
     if args.verify:
-        verification_by_mac = {row.get("mac"): row for row in verification_rows(client, devices) if row.get("mac")}
+        verification_by_mac = {
+            row.get("mac"): row for row in verification_rows(client, devices, args.action) if row.get("mac")
+        }
         for row in rows:
             verification = verification_by_mac.get(row.get("mac"))
             if verification:
@@ -613,6 +769,207 @@ def run_control(client: Any, args: argparse.Namespace) -> int:
     return 0
 
 
+def set_light_device(client: Any, device: Any, args: argparse.Namespace) -> list[str]:
+    mac = attr(device, "mac")
+    model = product_model(device)
+    statuses: list[str] = []
+    ensure_sdk_bulb_model_support(device)
+
+    if args.brightness is not None:
+        client.bulbs.set_brightness(device_mac=mac, device_model=model, brightness=args.brightness)
+        statuses.append(f"set brightness to {args.brightness}")
+
+    if args.temperature is not None:
+        client.bulbs.set_color_temp(device_mac=mac, device_model=model, color_temp=args.temperature)
+        statuses.append(f"set temperature to {args.temperature}")
+
+    if args.color is not None:
+        client.bulbs.set_color(device_mac=mac, device_model=model, color=args.color)
+        statuses.append(f"set color to {args.color}")
+
+    return statuses
+
+
+def run_set_light(client: Any, args: argparse.Namespace) -> int:
+    if args.brightness is None and args.temperature is None and args.color is None:
+        print("set-light needs at least one of --brightness, --temperature, or --color.", file=sys.stderr)
+        return 2
+
+    devices = [
+        device
+        for device in client.devices_list()
+        if device_matches_query(device, args.query) and is_bulb_device(device)
+    ]
+    devices.sort(key=lambda device: (attr(device, "nickname") or "").casefold())
+
+    if not devices:
+        if args.json:
+            print(json.dumps([], indent=2, sort_keys=True))
+        else:
+            print("No matching live Wyze lights found.")
+        return 0
+
+    rows = []
+    for device in devices:
+        item = device_to_dict(device)
+        item["status"] = "; ".join(set_light_device(client, device, args))
+        rows.append(item)
+
+    if args.verify:
+        verification_by_mac = {row.get("mac"): row for row in verification_rows(client, devices) if row.get("mac")}
+        for row in rows:
+            verification = verification_by_mac.get(row.get("mac"))
+            if verification:
+                row["verification"] = {
+                    key: value for key, value in verification.items() if key not in {"nickname", "mac"}
+                }
+
+    if args.json:
+        print(json.dumps(rows, indent=2, sort_keys=True))
+    else:
+        print_table(rows, ["nickname", "status", "type", "model", "mac"])
+
+    return 0
+
+
+def run_adjust_light(client: Any, args: argparse.Namespace) -> int:
+    devices = [
+        device
+        for device in client.devices_list()
+        if device_matches_query(device, args.query) and is_bulb_device(device)
+    ]
+    devices.sort(key=lambda device: (attr(device, "nickname") or "").casefold())
+
+    if not devices:
+        if args.json:
+            print(json.dumps([], indent=2, sort_keys=True))
+        else:
+            print("No matching live Wyze lights found.")
+        return 0
+
+    rows = []
+    for device in devices:
+        before = device_power_info(client, device) or {}
+        target = adjusted_brightness(
+            before.get("brightness"),
+            args.direction,
+            args.step,
+            args.min_brightness,
+            args.max_brightness,
+        )
+        client.bulbs.set_brightness(
+            device_mac=attr(device, "mac"), device_model=product_model(device), brightness=target
+        )
+        item = device_to_dict(device)
+        item["status"] = f"adjusted brightness from {before.get('brightness', 'unknown')} to {target}"
+        item["requested_direction"] = args.direction
+        item["brightness"] = target
+        rows.append(item)
+
+    if args.verify:
+        verification_by_mac = {row.get("mac"): row for row in verification_rows(client, devices) if row.get("mac")}
+        for row in rows:
+            verification = verification_by_mac.get(row.get("mac"))
+            if verification:
+                row["verification"] = {
+                    key: value for key, value in verification.items() if key not in {"nickname", "mac"}
+                }
+
+    if args.json:
+        print(json.dumps(rows, indent=2, sort_keys=True))
+    else:
+        print_table(rows, ["nickname", "requested_direction", "brightness", "status", "type", "model", "mac"])
+
+    return 0
+
+
+def is_ssl_cert_verification_error(exc: Exception) -> bool:
+    current: BaseException | None = exc
+    while current is not None:
+        name = current.__class__.__name__
+        text = str(current)
+        if name == "SSLCertVerificationError" or "CERTIFICATE_VERIFY_FAILED" in text:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def certifi_bundle_candidates() -> list[Path]:
+    if os.getenv("REQUESTS_CA_BUNDLE"):
+        return []
+
+    candidates: list[Path] = []
+
+    try:
+        import certifi
+    except ImportError:
+        pass
+    else:
+        candidates.append(Path(certifi.where()).expanduser().resolve())
+
+    python_paths: list[Path] = []
+    for executable_name in ("python", "python3"):
+        for directory in os.getenv("PATH", "").split(os.pathsep):
+            if not directory:
+                continue
+            python = Path(directory) / executable_name
+            if python.exists() and os.access(python, os.X_OK):
+                python_paths.append(python.resolve())
+
+    for python in python_paths:
+        if python == Path(sys.executable).resolve():
+            continue
+        try:
+            result = subprocess.run(
+                [str(python), "-m", "certifi"],
+                capture_output=True,
+                check=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+        else:
+            path = Path(result.stdout.strip()).expanduser().resolve()
+            if path.exists():
+                candidates.append(path)
+
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        unique.append(candidate)
+    return unique
+
+
+def configure_ca_bundle(bundle: Path) -> None:
+    os.environ["REQUESTS_CA_BUNDLE"] = str(bundle)
+
+
+def run_live_command(args: argparse.Namespace, creds: dict[str, str | None], db_path: Path) -> int:
+    client = make_client(creds)
+    if args.command == "list":
+        return run_list(client, args)
+    if args.command == "lookup":
+        count = refresh_discovery_cache(client, db_path)
+        print(
+            f"Discovery cache refreshed with {count} device{'s' if count != 1 else ''} into {db_path}.",
+            file=sys.stderr,
+        )
+        return run_lookup(args)
+    if args.command == "control":
+        return run_control(client, args)
+    if args.command == "set-light":
+        return run_set_light(client, args)
+    if args.command == "adjust-light":
+        return run_adjust_light(client, args)
+
+    print(f"Unknown command: {args.command}", file=sys.stderr)
+    return 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     examples = "\n".join(
         [
@@ -620,8 +977,12 @@ def build_parser() -> argparse.ArgumentParser:
             "  uv run --script wyze_devices.py list",
             "  uv run --script wyze_devices.py list --discover",
             "  uv run --script wyze_devices.py skill --install",
+            "  uv run --script wyze_devices.py skill --uninstall",
             "  uv run --script wyze_devices.py lookup camera",
             '  uv run --script wyze_devices.py control "desk plug" off',
+            '  uv run --script wyze_devices.py adjust-light "corner" brighter --step 20 --verify --json',
+            '  uv run --script wyze_devices.py set-light "corner" --brightness 70 --temperature 3500',
+            '  uv run --script wyze_devices.py set-light "corner" --color ff8800 --verify --json',
             "  python wyze_devices.py list",
             "  python wyze_devices.py list --all --json",
             "  python wyze_devices.py skill --json",
@@ -648,15 +1009,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     skill_parser = subparsers.add_parser(
         "skill",
-        help="Show or install the bundled agent skill.",
+        help="Show, install, or uninstall the bundled agent skill.",
         description=(
-            "Show or install the bundled agent skill. This command is offline and does not require Wyze credentials."
+            "Show, install, or uninstall the bundled agent skill. This command is offline and does not require "
+            "Wyze credentials."
         ),
     )
-    skill_parser.add_argument(
+    skill_action = skill_parser.add_mutually_exclusive_group()
+    skill_action.add_argument(
         "--install",
         action="store_true",
         help="Install the bundled skill into the agent skills directory.",
+    )
+    skill_action.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="Remove the bundled skill from the agent skills directory.",
     )
     skill_parser.add_argument(
         "--destination",
@@ -710,9 +1078,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     control_parser = subparsers.add_parser(
         "control",
-        help="Turn matching live Wyze plugs or cameras on or off.",
+        help="Turn matching live Wyze plugs, bulbs, or cameras on or off.",
         description=(
-            "Turn matching live Wyze plugs or cameras on or off. The query is "
+            "Turn matching live Wyze plugs, bulbs, or cameras on or off. The query is "
             "matched case-insensitively against nickname, MAC, type, or model."
         ),
     )
@@ -733,7 +1101,91 @@ def build_parser() -> argparse.ArgumentParser:
     control_parser.add_argument(
         "--verify",
         action="store_true",
-        help="After sending commands, fetch plug state where supported and include verification.",
+        help="After sending commands, fetch power state where supported and include verification.",
+    )
+
+    light_parser = subparsers.add_parser(
+        "set-light",
+        help="Set matching live Wyze light brightness, color temperature, or color.",
+        description=(
+            "Set brightness, color temperature, or RGB color on matching live Wyze lights. "
+            "The query is matched case-insensitively against nickname, MAC, type, or model."
+        ),
+    )
+    light_parser.add_argument(
+        "query",
+        help="Case-insensitive match against nickname, MAC, type, or model.",
+    )
+    light_parser.add_argument(
+        "--brightness",
+        type=int,
+        help="Brightness level to set. Wyze validates the supported device range.",
+    )
+    light_parser.add_argument(
+        "--temperature",
+        type=int,
+        help="Color temperature in kelvin, for example 3500. Wyze validates the supported device range.",
+    )
+    light_parser.add_argument(
+        "--color",
+        type=normalize_hex_color,
+        help="RGB color as a 6-digit hex value, for example ff8800 or #ff8800.",
+    )
+    light_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print JSON instead of a table.",
+    )
+    light_parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="After setting light properties, fetch bulb state and include verification.",
+    )
+
+    adjust_parser = subparsers.add_parser(
+        "adjust-light",
+        help="Adjust matching live Wyze light brightness relative to its current value.",
+        description=(
+            "Adjust brightness up or down on matching live Wyze lights. This is the best command for natural-language "
+            "requests such as make a light brighter, brighten the room, dim the lamp, or make it less bright."
+        ),
+    )
+    adjust_parser.add_argument(
+        "query",
+        help="Case-insensitive match against nickname, MAC, type, or model.",
+    )
+    adjust_parser.add_argument(
+        "direction",
+        choices=("brighter", "dimmer", "up", "down", "increase", "decrease"),
+        help="Brightness adjustment direction.",
+    )
+    adjust_parser.add_argument(
+        "--step",
+        type=bounded_int,
+        default=DEFAULT_BRIGHTNESS_STEP,
+        help=f"Brightness points to add or subtract. Defaults to {DEFAULT_BRIGHTNESS_STEP}.",
+    )
+    adjust_parser.add_argument(
+        "--min-brightness",
+        type=bounded_int,
+        default=DEFAULT_MIN_BRIGHTNESS,
+        help=f"Lower brightness clamp. Defaults to {DEFAULT_MIN_BRIGHTNESS}.",
+    )
+    adjust_parser.add_argument(
+        "--max-brightness",
+        type=bounded_int,
+        default=DEFAULT_MAX_BRIGHTNESS,
+        help=f"Upper brightness clamp. Defaults to {DEFAULT_MAX_BRIGHTNESS}.",
+    )
+    adjust_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print JSON instead of a table.",
+    )
+    adjust_parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="After adjusting brightness, fetch bulb state and include verification.",
     )
 
     return parser
@@ -767,24 +1219,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     try:
-        client = make_client(creds)
-        if args.command == "list":
-            return run_list(client, args)
-        if args.command == "lookup":
-            count = refresh_discovery_cache(client, db_path)
-            print(
-                f"Discovery cache refreshed with {count} device{'s' if count != 1 else ''} into {db_path}.",
-                file=sys.stderr,
-            )
-            return run_lookup(args)
-        if args.command == "control":
-            return run_control(client, args)
+        return run_live_command(args, creds, db_path)
     except Exception as exc:
+        if is_ssl_cert_verification_error(exc):
+            last_exc = exc
+            for bundle in certifi_bundle_candidates():
+                configure_ca_bundle(bundle)
+                print(f"Retrying with certifi CA bundle: {bundle}", file=sys.stderr)
+                try:
+                    return run_live_command(args, creds, db_path)
+                except Exception as retry_exc:
+                    last_exc = retry_exc
+                    if not is_ssl_cert_verification_error(retry_exc):
+                        break
+
+            print_cli_error(last_exc)
+            return 1
+
         print_cli_error(exc)
         return 1
-
-    print(f"Unknown command: {args.command}", file=sys.stderr)
-    return 2
 
 
 if __name__ == "__main__":

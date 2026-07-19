@@ -382,8 +382,9 @@ wheels = [
 [[package]]
 name = "wyze-local-devices"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
+    { name = "certifi" },
     { name = "protobuf" },
     { name = "python-dotenv" },
     { name = "wyze-sdk" },
@@ -397,6 +398,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "certifi", specifier = ">=2024.2.2" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11.0" },
     { name = "protobuf", specifier = "==5.29.6" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
