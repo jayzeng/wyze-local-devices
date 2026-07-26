@@ -9,7 +9,7 @@ authors = [{ name = "Jay Zeng" }]
 dependencies = [
   "certifi>=2024.2.2",
   "python-dotenv>=1.0.0",
-  "wyze-sdk==2.3.6",
+  "wyze-sdk==2.3.7",
 ]
 
 [project.scripts]
